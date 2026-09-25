@@ -55,282 +55,33 @@ import urllib.request
 from datetime import datetime, timezone
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO_ROOT)
+
+from almanac import core as engine  # shared read-only engine (single source of truth)
+
 ALMANAC_PATH = os.path.join(REPO_ROOT, "docs", "AGENT_ALMANAC.json")
 DRAFTS_DIR = os.path.join(REPO_ROOT, "skills", "drafts")
 
-MAX_FETCH_BYTES = 512_000          # hard cap on any remote read
-USER_AGENT = "AgentAlmanacScout/1.0 (read-only; no-code-execution)"
+MAX_FETCH_BYTES = engine.MAX_FETCH_BYTES   # hard cap on any remote read
+USER_AGENT = engine.USER_AGENT
 
 # --------------------------------------------------------------------------
-# Capability taxonomy — what an agent can actually DO (scope & utility axis)
-# --------------------------------------------------------------------------
-CAPABILITY_PATTERNS = {
-    "terminal_exec":      [r"\bshell\b", r"\bterminal\b", r"\bbash\b", r"subprocess", r"\brun_command\b"],
-    "file_edit":          [r"\bstr_replace\b", r"\bfile[_ ]edit", r"write_file", r"edit_file", r"\bapply_patch\b"],
-    "git_ops":            [r"\bgit\b.{0,40}(commit|diff|push|branch)", r"apply_patch", r"\bversion control\b"],
-    "python_exec":        [r"python_executor", r"\bsandbox(ed)?\b.{0,20}exec", r"code[_ ]interpreter", r"\beval\(.*code"],
-    "web_search":         [r"duckduckgo", r"web[_ ]search", r"serpapi", r"\bbrave search\b", r"search_web"],
-    "tool_calling":       [r"\bfunction[_ ]calling\b", r"\btool[_ ]call", r"@tool\b", r"tool_choice", r"openai_api_compatible"],
-    "structured_output":  [r"\bjson[_ ]mode\b", r"output[_ ]schema", r"pydantic", r"\bstructured outputs?\b"],
-    "memory_context":     [r"\bmemory\b", r"\brag\b", r"vector[_ ]store", r"embeddings?\b"],
-    "browser_automation": [r"\bplaywright\b", r"\bpuppeteer\b", r"selenium", r"headless browser"],
-    "planning":           [r"\bplan(ning)?\b", r"task[_ ]decomposition", r"thought[_ ]chain", r"\breact\b.{0,20}loop"],
-}
-
-# --------------------------------------------------------------------------
-# Safety filter — reject BEFORE writing. Aggressive / unsafe directives.
-# --------------------------------------------------------------------------
-SAFETY_DENY = [
-    (r"ignore\s+(all\s+)?(user|the user|human)[\s'\"-]*(pushback|objections?|warnings?|refusals?)",
-     "instructs model to ignore user pushback"),
-    (r"(never|don'?t)\s+(ask|prompt|wait for)\s+(the\s+)?user",
-     "suppresses required user confirmation"),
-    (r"auto[\s-]?commit\s+(without|with[out])\s+(asking|permission|approval)",
-     "unauthorized auto-commits"),
-    (r"(silently|secretly|covertly|without (telling|informing|asking))\s+\w*\s*(user|human|operator)",
-     "covert action against the user"),
-    (r"(exfiltrat|send|upload|post).{0,40}(secrets?|credentials?|\.env|api[_ ]?keys?)",
-     "potential credential exfiltration directive"),
-    (r"(disable|bypass|turn off|ignore)\s+(all\s+)?(safety|guardrails?|filters?|permissions?)",
-     "disables safety guardrails"),
-    (r"(infinite|endless|unbounded|unlimited)\s+(loop|retry|retries|iterations?)",
-     "commands an unbounded retry loop"),
-    (r"(keep|continue)\s+(trying|retrying)\s+(forever|indefinitely|until it works)",
-     "open-ended retry without bound"),
-    (r"rm\s+-rf\s+/|curl[^|]*\|\s*(ba)?sh|wget[^|]*\|\s*(ba)?sh",
-     "destructive/piped-to-shell one-liner"),
-    (r"(override|disregard|forget)\s+(previous|prior|above|system)\s+(instructions?|rules?|prompts?)",
-     "prompt-injection style override directive"),
-    (r"(self[- ])?modif(y|ication)|edit your own (prompt|instructions)|change your own weights",
-     "self-modification directive"),
-]
-
-# Bounded-loop POSITIVE markers (raise loop_risk score => safer)
-BOUNDED_MARKERS = [
-    r"\bmax[_ ]?(steps|iterations|retries|loops)\b",
-    r"\btimeout\b", r"\bbudget\b", r"\blimit(ed)?\b", r"\bat most\b",
-    r"\bsingle[ -]?check\b", r"\boneshot\b", r"\bone[- ]shot\b",
-    r"\bfail[ -]?fast\b", r"\bbounded\b", r"\bcircuit breaker\b",
-]
-UNBOUNDED_MARKERS = [
-    r"\bwhile True\b", r"\bloop until success\b", r"\bretry(ing)? until\b",
-    r"\bkeep going\b", r"\buntil done\b", r"\brecursively spawn\b",
-    r"\bspawn(s|ing)? (new )?(agents?|subagents?)\b",
-]
-
-# Free-tier overhead heuristics — heavier prompt scaffolding costs more tokens
-HEAVY_MARKERS = [
-    r"\bfew[- ]shot\b", r"\bchain[- ]of[- ]thought\b", r"\breflection\b",
-    r"\bmulti[- ]agent\b", r"\bre[- ]?planning\b", r"\bscratchpad\b",
-    r"\bverbose\b", r"\bextensive context\b", r"\btree of thoughts\b",
-]
-LEAN_MARKERS = [
-    r"\bconcise\b", r"\bminimal\b", r"\bsystem prompt.{0,30}\bbrief",
-    r"\btoken[- ]efficient\b", r"\blazy loading\b", r"\bon demand\b",
-    r"\bstreaming\b",
-]
-
-# File kinds worth mining in a repo (relative-path matchers)
-INTERESTING_FILE = re.compile(
-    r"(^|/)(README(\.md|\.rst)?$|SKILL\.md$|AGENTS\.md$|CLAUDE\.md$|"
-    r"SYSTEM_PROMPT|system_prompt|prompts?/|\.claude/skills/|\.cursor/rules/|"
-    r"skills/|tools?/|agent[s]?\.py$|agent_.+\.py$|prompts?\.py$|cli\.py$)",
-    re.IGNORECASE,
-)
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _slug(text: str) -> str:
-    s = re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
-    return s[:60] or "skill"
-
-
-def _sha(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-
-
 # ==========================================================================
-# Fetching (read-only network) & local ingestion
+# Thin aliases — ALL engine logic (taxonomy, safety deny-list, scoring,
+# extraction) now lives in almanac/core.py. These wrappers exist only so
+# this module's CLI keeps its historical names; behavior is identical and
+# any rubric/deny-list change lands once, in the shared engine.
 # ==========================================================================
-
-def http_get(url: str):
-    """Plain HTTPS GET with size cap. Returns text or None. Never executes."""
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            ctype = resp.headers.get("Content-Type", "")
-            if any(t in ctype for t in ("image/", "application/octet-stream", "zip")):
-                return None
-            data = resp.read(MAX_FETCH_BYTES + 1)
-            if len(data) > MAX_FETCH_BYTES:
-                data = data[:MAX_FETCH_BYTES]
-            return data.decode("utf-8", errors="replace")
-    except Exception as exc:  # offline-tolerant: caller degrades gracefully
-        print(f"  [fetch-skip] {url} ({exc.__class__.__name__})", file=sys.stderr)
-        return None
-
-
-def parse_github_url(url: str):
-    m = re.match(r"https?://(?:www\.)?github\.com/([^/\s]+)/([^/\s#?]+)", url)
-    if not m:
-        return None
-    return m.group(1), m.group(2).removesuffix(".git")
-
-
-def default_paths_for_repo(owner: str, repo: str) -> list[str]:
-    """Known text paths to mine — mirrors the gh_repo_scout blueprint."""
-    raw = f"https://raw.githubusercontent.com/{owner}/{repo}/HEAD/"
-    return [
-        raw + "README.md",
-        raw + "AGENTS.md",
-        raw + "CLAUDE.md",
-        raw + "src/smolagents/agents.py",
-        raw + "src/smolagents/default_tools.py",
-        raw + "examples/open_deep_research/README.md",
-    ]
-
-
-def fetch_repo_texts(owner: str, repo: str) -> dict:
-    texts: dict = {}
-    for url in default_paths_for_repo(owner, repo):
-        body = http_get(url)
-        if body and INTERESTING_FILE.search(url):
-            path = url.split(f"{repo}/HEAD/")[-1]
-            texts[path] = body
-    return texts
-
-
-def ingest_local(path: str) -> dict:
-    """Read-only walk of a local checkout/dir. Skips binaries & huge files."""
-    texts: dict = {}
-    if os.path.isfile(path):
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            texts[os.path.basename(path)] = fh.read(MAX_FETCH_BYTES)
-        return texts
-    for root, dirs, files in os.walk(path):
-        dirs[:] = [d for d in dirs if d not in
-                   {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build"}]
-        for fn in files:
-            rel = os.path.relpath(os.path.join(root, fn), path)
-            if not INTERESTING_FILE.search("/" + rel.replace(os.sep, "/")):
-                continue
-            fp = os.path.join(root, fn)
-            try:
-                if os.path.getsize(fp) > MAX_FETCH_BYTES:
-                    continue
-                with open(fp, "r", encoding="utf-8", errors="replace") as fh:
-                    texts[rel] = fh.read(MAX_FETCH_BYTES)
-            except OSError:
-                pass
-    return texts
-
-
-# ==========================================================================
-# Pattern extraction
-# ==========================================================================
-TOOL_DEF_RE = re.compile(
-    r"@tool\b|class\s+(\w*(?:Tool|Agent)\w*)\b|def\s+(tool_\w+|\w*_tool)\s*\("
-    r"|\"name\"\s*:\s*\"([\w.-]+)\"", re.MULTILINE)
-
-PROMPT_DIRECTIVE_RE = re.compile(
-    r"^[\s>#*-]*(You are|Your role|You must|Always|Never|Do NOT|When asked)[^\n]{8,}",
-    re.MULTILINE)
-
-
-def extract_capabilities(texts: dict) -> list:
-    blob = "\n".join(texts.values())
-    found = []
-    for cap, pats in CAPABILITY_PATTERNS.items():
-        if any(re.search(p, blob, re.IGNORECASE) for p in pats):
-            found.append(cap)
-    return sorted(found)
-
-
-def extract_tool_names(texts: dict) -> list:
-    names = set()
-    for body in texts.values():
-        for m in TOOL_DEF_RE.finditer(body):
-            for g in m.groups():
-                if g and 3 <= len(g) <= 40:
-                    names.add(g)
-    return sorted(n for n in names if re.fullmatch(r"[A-Za-z][\w.-]{2,39}", n))[:40]
-
-
-def extract_directives(texts: dict, limit: int = 6) -> list:
-    out = []
-    for body in texts.values():
-        for m in PROMPT_DIRECTIVE_RE.finditer(body):
-            d = re.sub(r"\s+", " ", m.group(0)).strip()
-            if d not in out:
-                out.append(d)
-            if len(out) >= limit:
-                return out
-    return out
-
-
-# ==========================================================================
-# Scoring
-# ==========================================================================
-
-def score_agent(texts: dict) -> dict:
-    blob = "\n".join(texts.values())
-    caps = extract_capabilities(texts)
-
-    # --- scope & utility -------------------------------------------------
-    scope = min(10.0, 1.6 * len(caps))
-
-    # --- free-tier efficiency -------------------------------------------
-    heavy = sum(len(re.findall(p, blob, re.IGNORECASE)) for p in HEAVY_MARKERS)
-    lean = sum(len(re.findall(p, blob, re.IGNORECASE)) for p in LEAN_MARKERS)
-    size_kb = len(blob) / 1024.0
-    eff = 7.0 + lean * 0.5 - heavy * 0.8 - max(0.0, (size_kb - 60) / 40.0)
-    eff = round(max(0.0, min(10.0, eff)), 1)
-    tier = "HIGH" if eff >= 7 else "MEDIUM" if eff >= 4 else "LOW"
-
-    # --- loop-risk profile (higher score = better bounded) ---------------
-    bounded = sum(len(re.findall(p, blob, re.IGNORECASE)) for p in BOUNDED_MARKERS)
-    unbounded = sum(len(re.findall(p, blob, re.IGNORECASE)) for p in UNBOUNDED_MARKERS)
-    loop = 5.0 + min(5.0, bounded * 1.2) - min(8.0, unbounded * 2.0)
-    loop = round(max(0.0, min(10.0, loop)), 1)
-    profile = "LOW" if loop >= 7 else "MEDIUM" if loop >= 4 else "HIGH"
-
-    risks = []
-    if unbounded:
-        risks.append("unbounded_loop_on_syntax_error")
-    if "terminal_exec" in caps and loop < 7:
-        risks.append("shell_access_with_weak_bounds")
-    if heavy >= 4:
-        risks.append("prompt_bloat_high_token_overhead")
-
-    utility = round(0.4 * scope + 0.25 * eff + 0.35 * loop, 1)
-    return {
-        "capabilities": caps,
-        "scores": {
-            "scope_utility": round(scope, 1),
-            "free_tier_efficiency": eff,
-            "loop_risk": loop,
-        },
-        "utility_score": utility,
-        "free_tier_efficiency": tier,
-        "loop_risk_profile": profile,
-        "known_risks": risks,
-    }
-
-
-# ==========================================================================
-# Safety filter & SKILL.md drafting
-# ==========================================================================
-
-def safety_scan(text: str) -> list:
-    """Return list of human-readable violations (empty == safe)."""
-    violations = []
-    for pat, why in SAFETY_DENY:
-        if re.search(pat, text, re.IGNORECASE):
-            violations.append(why)
-    return violations
+_now = engine.now_iso
+_slug = engine.slug
+_sha = engine.content_sha
+http_get = engine.http_get
+extract_capabilities = engine.extract_capabilities
+extract_tool_names = engine.extract_tool_declarations
+extract_directives = engine.extract_system_prompts
+score_agent = engine.score_agent
+safety_scan = engine.safety_scan
+CAPABILITY_PATTERNS = engine.CAPABILITY_PATTERNS
 
 
 SKILL_TEMPLATE = """---
@@ -383,7 +134,10 @@ def draft_skills(entry: dict, texts: dict) -> list:
         relevant = {p: b for p, b in texts.items()
                     if any(re.search(pat, b, re.IGNORECASE)
                            for pat in CAPABILITY_PATTERNS.get(cap, []))}
-        directives = extract_directives(relevant or texts, limit=4)
+        # HARD GATE mirror of almanac.core.run_pipeline: only quote directives
+        # from files that are themselves clean under the shared deny-list.
+        safe_relevant = {p: b for p, b in relevant.items() if not safety_scan(b)}
+        directives = extract_directives(safe_relevant, limit=4)
         tools = extract_tool_names(relevant or texts)[:8]
 
         procedure_lines = ["1. Confirm the goal maps to this capability before acting."]
@@ -460,13 +214,17 @@ def upsert_entry(reg: dict, entry: dict) -> None:
 # ==========================================================================
 
 def cmd_ingest(args) -> int:
+    # Fetch/ingest delegates to scouts/gh_repo_scout (GitHub tree API + local
+    # walk) so there is exactly ONE ingestion implementation in the repo.
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scouts"))
+    import gh_repo_scout as gh
     target = args.target
     texts = {}
-    gh = parse_github_url(target)
-    if gh:
-        owner, repo = gh
-        print(f"[ingest] GitHub read-only fetch: {owner}/{repo}")
-        texts = fetch_repo_texts(owner, repo)
+    gh_parsed = gh.parse_github_url(target)
+    if gh_parsed:
+        owner, repo, branch = gh_parsed
+        print(f"[ingest] GitHub read-only fetch: {owner}/{repo}@{branch}")
+        texts = gh.fetch_repo_texts(owner, repo, branch)
         source = f"https://github.com/{owner}/{repo}"
         agent_id = getattr(args, "name", None) or _slug(f"{owner}_{repo}")
     elif re.match(r"https?://huggingface\.co/", target):
@@ -490,7 +248,7 @@ def cmd_ingest(args) -> int:
             print(f"[ingest] path not found: {target}", file=sys.stderr)
             return 2
         print(f"[ingest] local read-only scan: {target}")
-        texts = ingest_local(target)
+        texts = gh.ingest_local(target)
         source = getattr(args, "source", None) or f"local:{os.path.abspath(target)}"
         agent_id = getattr(args, "name", None) or _slug(
             os.path.basename(os.path.abspath(target.rstrip('/'))))
@@ -540,9 +298,10 @@ def cmd_score(args) -> int:
     print("-" * 100)
     for e in entries:
         s = e.get("scores", {})
+        src_url = e.get("source") or e.get("source_url", "")
         print(f"{e['utility_score']:>7.1f}  {e['free_tier_efficiency']:<6} "
               f"{e['loop_risk_profile']:<9} {e['agent_id'][:34]:<34} "
-              f"{e['source'][:44]}  "
+              f"{src_url[:44]}  "
               f"(scope {s.get('scope_utility', '-')}/eff {s.get('free_tier_efficiency', '-')}"
               f"/loop {s.get('loop_risk', '-')})")
     return 0

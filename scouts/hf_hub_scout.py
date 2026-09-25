@@ -10,8 +10,9 @@ schema/agent_entry_schema.json, and renders vetted SKILL.md files into
 skills/ using skills/templates/SKILL_TEMPLATE.md.
 
 This module deliberately REUSES the extraction / scoring / safety / template
-engine from scouts/gh_repo_scout.py (imported as a local sibling module —
-never does it execute or import any code from the *target* being scouted).
+engine from the shared `almanac` package (almanac/core.py) — the single
+source of truth every scout imports. It never executes or imports any code
+from the *target* being scouted.
 
 Guarantees
   * READ-ONLY: plain HTTPS GETs to huggingface.co with hard size caps.
@@ -44,8 +45,9 @@ import sys
 import urllib.parse
 import urllib.request
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import gh_repo_scout as engine  # local sibling module — vetted engine reuse
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from almanac import core as engine  # shared read-only engine (single source of truth)
 
 HF_API = "https://huggingface.co/api"
 USER_AGENT = engine.USER_AGENT.replace("github", "hf-hub")
