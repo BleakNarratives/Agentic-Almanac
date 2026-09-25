@@ -105,6 +105,12 @@ SAFETY_DENY = [
      "explicit self-modification imperative"),
     (r"git\s+push\s+(-f|--force)(\s|$)",
      "forced git push (history destruction)"),
+    # imperative commit-without-consent phrasings ("never ask the user before
+    # git commit", "commit without permission") — broader than the auto-commit
+    # pattern above; fixtures + real-world evil prompts use this shape.
+    (r"\b(?:never|don'?t|without)\s+(?:asking|ask|permission|approval|consent)[^.]{0,40}\bgit\b|"
+     r"\bgit\b[^.]{0,30}\bwithout\s+(?:asking|permission|the user)",
+     "git actions without user consent"),
 ]
 
 # Bounded-loop POSITIVE markers (raise loop score => safer)
@@ -307,8 +313,9 @@ def make_entry(agent_id: str, source_url: str, texts: dict,
 # ---------------------------------------------------------------------------
 # Schema validation against schema/agent_entry_schema.json
 # ---------------------------------------------------------------------------
-def validate_against_schema(entry: dict, schema_path: str) -> tuple:
+def validate_against_schema(entry: dict, schema_path: str = None) -> tuple:
     """Returns (ok: bool, method: str, detail: str)."""
+    schema_path = schema_path or DEFAULT_SCHEMA
     try:
         with open(schema_path, "r", encoding="utf-8") as fh:
             schema = json.load(fh)
@@ -455,7 +462,8 @@ def upsert_entry(reg: dict, entry: dict) -> None:
 #   index/ALMANAC_INDEX.json : {source_url -> agent_id, content_hash, utility,
 #                               ingested_at, files_ingested}
 # ---------------------------------------------------------------------------
-INDEX_PATH = os.path.join(REPO_ROOT, "index", "ALMANAC_INDEX.json")
+INDEX_PATH = os.environ.get("ALMANAC_INDEX_PATH") or \
+    os.path.join(REPO_ROOT, "index", "ALMANAC_INDEX.json")
 
 
 def load_index(path: str = INDEX_PATH) -> dict:

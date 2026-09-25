@@ -6,11 +6,25 @@
     "ingested_at": "2026-09-25T14:08:14Z",
     "utility_score": 8.1
   },
+  "local:/workspace/tests/fixtures/evil_agent_space": {
+    "agent_id": "evil_test",
+    "content_hash": "5d707eac2eb02126",
+    "files_ingested": 1,
+    "ingested_at": "2026-09-25T14:20:07Z",
+    "utility_score": 5.4
+  },
   "local:idxdup": {
     "agent_id": "idx_unit",
     "content_hash": "e190047b5bdc041b",
     "files_ingested": 1,
-    "ingested_at": "2026-09-25T14:12:21Z",
+    "ingested_at": "2026-09-25T14:20:35Z",
     "utility_score": 8.1
+  },
+  "local:test": {
+    "agent_id": "evil_unit",
+    "content_hash": "5d707eac2eb02126",
+    "files_ingested": 1,
+    "ingested_at": "2026-09-25T14:20:11Z",
+    "utility_score": 5.4
   }
 }

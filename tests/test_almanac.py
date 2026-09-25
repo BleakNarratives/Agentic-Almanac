@@ -94,12 +94,14 @@ class TestSafetyFilter:
         # corpus-level scan must also flag the target as a whole
         assert engine.safety_scan("\n".join(texts.values()))
 
-    def test_corpus_gate_blocks_write_of_unsafe_directives(self, tmp_path):
+    def test_corpus_gate_blocks_write_of_unsafe_directives(self, tmp_path, monkeypatch):
         """Regression: hostile source text must never be laundered into a
-        rendered SKILL.md via quoted 'source directives'."""
+        rendered SKILL.md via quoted 'source directives'. force=True pins the
+        safety property to THIS run (index SKIP would mask it)."""
         out = tmp_path / "skills"
+        monkeypatch.setattr(engine, "INDEX_PATH", str(tmp_path / "index.json"))
         rc = engine.run_pipeline("evil_unit", "local:test", read_texts(EVIL),
-                                 out_dir=str(out))
+                                 out_dir=str(out), force=True)
         assert rc == 1
         assert list(out.rglob("SKILL.md")) == [] if out.exists() else True
 
@@ -107,7 +109,7 @@ class TestSafetyFilter:
         out = tmp_path / "skills"
         proc = subprocess.run(
             [sys.executable, os.path.join(REPO_ROOT, "scouts", "gh_repo_scout.py"),
-             EVIL, "--name", "evil_test", "--out-dir", str(out)],
+             EVIL, "--name", "evil_test", "--out-dir", str(out), "--force"],
             capture_output=True, text=True)
         assert proc.returncode == 1, proc.stdout + proc.stderr
         written = list(out.rglob("SKILL.md")) if out.exists() else []
@@ -137,7 +139,11 @@ class TestSafetyFilter:
         for word in ("pushback", "confirmation", "auto-commits", "covert",
                      "destructive"):
             assert word in out, f"check output missing {word!r}: {out}"
-        assert "[PASS]" in proc.stdout, "clean files must still pass individually"
+        # end-to-end with the shared deny-list: EVERY file in a hostile corpus
+        # must be individually REJECTed (tools.py documents shell+git-without-
+        # permission; agent_tools.py adds curl|sh + while-True loops).
+        assert "[PASS]" not in proc.stdout, \
+            "every evil fixture file trips the deny-list — none may pass"
 
     def test_draft_never_laundered_unsafe_directives(self, tmp_path):
         """Regression: quoted 'source directive' lines in drafted skills must
@@ -415,14 +421,18 @@ class TestAlmanacIndex:
         assert "[index] SKIP" in capsys.readouterr().err
 
     def test_batch_cli_dedupes_second_run(self, tmp_path):
+        # fresh per-test index (env override) so first run genuinely ingests
+        # and the second dedupes purely on content hash.
+        idx = str(tmp_path / "ALMANAC_INDEX.json")
+        env = dict(os.environ, ALMANAC_INDEX_PATH=idx)
         targets = tmp_path / "targets.txt"
         targets.write_text(f"# comment\n{CLEAN}\n")
         cmd = [sys.executable, os.path.join(REPO_ROOT, "tools", "almanac_scout.py"),
                "batch", str(targets)]
-        first = subprocess.run(cmd, capture_output=True, text=True)
+        first = subprocess.run(cmd, capture_output=True, text=True, env=env)
         assert first.returncode == 0, first.stdout + first.stderr
         assert "ingested : 1" in first.stdout
-        second = subprocess.run(cmd, capture_output=True, text=True)
+        second = subprocess.run(cmd, capture_output=True, text=True, env=env)
         assert second.returncode == 0
         assert "skipped  : 1" in second.stdout
         assert "SKIP" in second.stdout
