@@ -452,28 +452,12 @@ def build_skill_files(entry: dict, texts: dict, template: str, validation_note: 
 # ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
-def cmd_scout(args) -> int:
-    target = args.target
-    gh = parse_github_url(target)
-    verbose = args.verbose
-    if gh:
-        owner, repo, branch = gh
-        source_url = f"https://github.com/{owner}/{repo}"
-        agent_id = args.name or _slug(f"{owner}_{repo}")
-        print(f"[scout] GitHub read-only fetch: {owner}/{repo}@{branch}")
-        texts = fetch_repo_texts(owner, repo, branch, verbose=verbose)
-    elif os.path.exists(target):
-        source_url = args.source or f"local:{os.path.abspath(target)}"
-        agent_id = args.name or _slug(os.path.basename(os.path.normpath(target)))
-        print(f"[scout] Local read-only ingest: {target}")
-        texts = ingest_local(target, verbose=verbose)
-    else:
-        print(f"[error] target is neither a GitHub URL nor an existing path: {target}",
-              file=sys.stderr)
-        return 2
-    if args.source:
-        source_url = args.source
-
+def run_pipeline(agent_id: str, source_url: str, texts: dict, *,
+                 out_dir: str = DEFAULT_OUT, template_path: str = DEFAULT_TEMPLATE,
+                 schema_path: str = DEFAULT_SCHEMA, dry_run: bool = False,
+                 register: bool = False, verbose: bool = False) -> int:
+    """Score → schema-validate → render → safety-filter → write SKILL.md.
+    Shared by gh_repo_scout (GitHub/local) and hf_hub_scout (HF hub)."""
     if not texts:
         print("[error] no readable text files were ingested; nothing to score.",
               file=sys.stderr)
@@ -506,9 +490,9 @@ def cmd_scout(args) -> int:
     if entry["known_risks"]:
         print(f"[score] known risks : {', '.join(entry['known_risks'])}")
 
-    ok, method, detail = validate_against_schema(entry, args.schema)
+    ok, method, detail = validate_against_schema(entry, schema_path)
     validation_note = f"{method} validator: {detail}"
-    print(f"[schema] {os.path.relpath(args.schema, REPO_ROOT)} via {method}: "
+    print(f"[schema] {os.path.relpath(schema_path, REPO_ROOT)} via {method}: "
           + ("PASS" if ok else f"FAIL ({detail})"))
     if not ok:
         print("[reject] refusing to write skills: entry does not satisfy the schema",
@@ -516,10 +500,10 @@ def cmd_scout(args) -> int:
         return 1
 
     try:
-        with open(args.template, "r", encoding="utf-8") as fh:
+        with open(template_path, "r", encoding="utf-8") as fh:
             template = fh.read()
     except OSError as exc:
-        print(f"[error] cannot read template {args.template}: {exc}", file=sys.stderr)
+        print(f"[error] cannot read template {template_path}: {exc}", file=sys.stderr)
         return 2
 
     candidates = build_skill_files(entry, texts, template, validation_note)
@@ -533,11 +517,11 @@ def cmd_scout(args) -> int:
         if violations:
             print(f"  [REJECTED] skills/{rel} :: " + "; ".join(violations), file=sys.stderr)
             continue
-        if args.dry_run:
+        if dry_run:
             print(f"  [dry-run] would write skills/{rel} ({len(content)} bytes)")
             written += 1
             continue
-        outfile = os.path.join(args.out_dir, rel)
+        outfile = os.path.join(out_dir, rel)
         os.makedirs(os.path.dirname(outfile), exist_ok=True)
         with open(outfile, "w", encoding="utf-8") as fh:
             fh.write(content)
@@ -545,7 +529,7 @@ def cmd_scout(args) -> int:
         written += 1
 
     # optional registry upsert (keeps docs/AGENT_ALMANAC.json current)
-    if args.register and not args.dry_run and written:
+    if register and not dry_run and written:
         reg_path = os.path.join(REPO_ROOT, "docs", "AGENT_ALMANAC.json")
         try:
             with open(reg_path, "r", encoding="utf-8") as fh:
@@ -561,8 +545,35 @@ def cmd_scout(args) -> int:
         print(f"[registry] upserted '{agent_id}' in {os.path.relpath(reg_path, REPO_ROOT)}")
 
     print(f"[done] {written}/{len(candidates)} SKILL.md file(s) "
-          + ("validated (dry-run)" if args.dry_run else "written"))
+          + ("validated (dry-run)" if dry_run else "written"))
     return 0 if written else 1
+
+
+def cmd_scout(args) -> int:
+    target = args.target
+    gh = parse_github_url(target)
+    verbose = args.verbose
+    if gh:
+        owner, repo, branch = gh
+        source_url = f"https://github.com/{owner}/{repo}"
+        agent_id = args.name or _slug(f"{owner}_{repo}")
+        print(f"[scout] GitHub read-only fetch: {owner}/{repo}@{branch}")
+        texts = fetch_repo_texts(owner, repo, branch, verbose=verbose)
+    elif os.path.exists(target):
+        source_url = args.source or f"local:{os.path.abspath(target)}"
+        agent_id = args.name or _slug(os.path.basename(os.path.normpath(target)))
+        print(f"[scout] Local read-only ingest: {target}")
+        texts = ingest_local(target, verbose=verbose)
+    else:
+        print(f"[error] target is neither a GitHub URL nor an existing path: {target}",
+              file=sys.stderr)
+        return 2
+    if args.source:
+        source_url = args.source
+    return run_pipeline(agent_id, source_url, texts,
+                        out_dir=args.out_dir, template_path=args.template,
+                        schema_path=args.schema, dry_run=args.dry_run,
+                        register=args.register, verbose=verbose)
 
 
 def main(argv=None) -> int:
