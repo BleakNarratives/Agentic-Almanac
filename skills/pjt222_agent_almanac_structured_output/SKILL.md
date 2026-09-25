@@ -9,6 +9,9 @@ utility_score: 6.6
 free_tier_efficiency: LOW
 loop_risk_profile: LOW
 safety_filter: PASSED
+status: promoted
+reviewed_by: human
+reviewed_at: 2026-09-25T13:35:22Z
 ---
 
 # structured_output skill (pjt222_agent_almanac)

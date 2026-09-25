@@ -98,6 +98,8 @@ SAFETY_DENY = [
      "prompt-injection style override directive"),
     (r"(self[- ])?modif(y|ication)|edit your own (prompt|instructions)|change your own weights",
      "self-modification directive"),
+    (r"git\s+push\s+(-f|--force)(\s|$)",
+     "forced git push (history destruction)"),
 ]
 
 # Bounded-loop POSITIVE markers (raise loop score => safer)
@@ -393,6 +395,22 @@ def save_registry(reg: dict, path: str = ALMANAC_PATH) -> None:
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(reg, fh, indent=2)
         fh.write("\n")
+
+
+def frontmatter_set(text: str, updates: dict) -> str:
+    """Set top-level YAML frontmatter keys in a SKILL.md (creates block if absent)."""
+    m = re.match(r"^---\n(.*?\n)---\n", text, re.S)
+    lines = []
+    for k, v in updates.items():
+        lines.append(f"{k}: {v}")
+    if not m:
+        return "---\n" + "\n".join(lines) + "\n---\n\n" + text
+    fm = m.group(1)
+    for line in lines:
+        key = line.split(":", 1)[0]
+        pat = re.compile(rf"^{key}:.*$", re.M)
+        fm = pat.sub(line, fm) if pat.search(fm) else fm + line + "\n"
+    return text[:m.start(1)] + fm + text[m.end(1):]
 
 
 def upsert_entry(reg: dict, entry: dict) -> None:

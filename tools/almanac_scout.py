@@ -46,10 +46,12 @@ CLI (dynamic only — every command reflects live parsed state, no static filler
 from __future__ import annotations
 
 import argparse
+import glob
 import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 import urllib.request
 from datetime import datetime, timezone
@@ -61,6 +63,9 @@ from almanac import core as engine  # shared read-only engine (single source of 
 
 ALMANAC_PATH = os.path.join(REPO_ROOT, "docs", "AGENT_ALMANAC.json")
 DRAFTS_DIR = os.path.join(REPO_ROOT, "skills", "drafts")
+SKILLS_DIR = os.path.join(REPO_ROOT, "skills")
+REJECTED_DIR = os.path.join(REPO_ROOT, "docs", "rejected")
+frontmatter_set = engine.frontmatter_set
 
 MAX_FETCH_BYTES = engine.MAX_FETCH_BYTES   # hard cap on any remote read
 USER_AGENT = engine.USER_AGENT
@@ -331,6 +336,112 @@ def cmd_drafts(_args) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# Draft lifecycle: draft -> (human review) -> promoted skill | rejected tombstone
+# ---------------------------------------------------------------------------
+def _find_draft(name: str):
+    """Resolve a draft dir by exact name, or <agent_id> prefix match."""
+    exact = os.path.join(DRAFTS_DIR, name)
+    if os.path.isfile(os.path.join(exact, "SKILL.md")):
+        return [exact]
+    hits = sorted(
+        d for d in glob.glob(os.path.join(DRAFTS_DIR, "*"))
+        if os.path.isfile(os.path.join(d, "SKILL.md"))
+        and (os.path.basename(d) == name or os.path.basename(d).startswith(name + "_"))
+    )
+    return hits
+
+
+def cmd_promote(args) -> int:
+    if args.names:
+        targets = []
+        for n in args.names:
+            hits = _find_draft(n)
+            if not hits:
+                print(f"  [error ] no draft matches '{n}'")
+                return 1
+            targets.extend(hits)
+    else:
+        targets = sorted(os.path.dirname(p) for p in
+                         glob.glob(os.path.join(DRAFTS_DIR, "*", "SKILL.md")))
+    if not targets:
+        print("(no drafts to promote — run `ingest` first)")
+        return 0
+    rc = 0
+    for d in targets:
+        src_md = os.path.join(d, "SKILL.md")
+        if not os.path.isfile(src_md):
+            print(f"  [error ] no such draft: {os.path.relpath(d, REPO_ROOT)}")
+            rc = 1
+            continue
+        with open(src_md, encoding="utf-8") as fh:
+            text = fh.read()
+        violations = safety_scan(text)          # re-gate at promotion time
+        if violations:
+            rc = 1
+            print(f"  [BLOCKED] {os.path.relpath(d, REPO_ROOT)} — safety filter:")
+            for v in violations:
+                print(f"             - {v}")
+            continue
+        name = os.path.basename(d)
+        dest_dir = os.path.join(SKILLS_DIR, name)
+        os.makedirs(dest_dir, exist_ok=True)
+        stamped = frontmatter_set(text, {
+            "status": "promoted",
+            "reviewed_by": args.reviewer,
+            "reviewed_at": engine.now_iso(),
+        })
+        with open(os.path.join(dest_dir, "SKILL.md"), "w", encoding="utf-8") as fh:
+            fh.write(stamped)
+        shutil.rmtree(d)
+        print(f"  [PROMOTE] skills/drafts/{name} -> skills/{name} "
+              f"(reviewed_by={args.reviewer})")
+    return rc
+
+
+def cmd_reject(args) -> int:
+    hits = _find_draft(args.name)
+    if not hits:
+        print(f"  [error ] no draft matches '{args.name}'")
+        return 1
+    rc = 0
+    for d in hits:
+        src_md = os.path.join(d, "SKILL.md")
+        with open(src_md, encoding="utf-8") as fh:
+            head = fh.read(600)
+        desc = next((m.group(1).strip() for m in
+                     [re.search(r"^description:\s*(.+)$", head, re.M)] if m), "")
+        name = os.path.basename(d)
+        with open(os.path.join(REJECTED_DIR, f"{name}.md"), "w",
+                  encoding="utf-8") as fh:
+            fh.write(f"---\nname: {name}\nstatus: rejected\n"
+                     f"reason: {args.reason}\nrejected_at: {engine.now_iso()}\n"
+                     f"reviewed_by: {args.reviewer}\ndescription: {desc}\n---\n\n"
+                     f"Rejected draft tombstone for `{name}`.\n"
+                     f"Reason: {args.reason}\n")
+        shutil.rmtree(d)
+        print(f"  [REJECT ] skills/drafts/{name} -> docs/rejected/{name}.md "
+              f"({args.reason})")
+    return rc
+
+
+def cmd_rejected(_args) -> int:
+    files = sorted(glob.glob(os.path.join(REJECTED_DIR, "*.md")))
+    if not files:
+        print("(no rejected drafts recorded)")
+        return 0
+    for f in files:
+        with open(f, encoding="utf-8") as fh:
+            text = fh.read()
+        reason = next((m.group(1) for m in
+                       [re.search(r"^reason:\s*(.+)$", text, re.M)] if m), "?")
+        when = next((m.group(1) for m in
+                     [re.search(r"^rejected_at:\s*(.+)$", text, re.M)] if m), "?")
+        print(f"  {os.path.relpath(f, REPO_ROOT):<58} {when:<22} {reason[:60]}")
+    print(f"{len(files)} rejected draft(s)")
+    return 0
+
+
 def cmd_check(args) -> int:
     rc = 0
     for path in args.files:
@@ -378,7 +489,8 @@ def cmd_validate(_args) -> int:
 def cmd_console(_args) -> int:
     print("Agent Almanac Scout console — read-only. "
           "cmds: score | drafts | ingest <path|url> | check <file> | "
-          "validate | quit")
+          "promote [name...] [--reviewer X] | reject <name> --reason R | "
+          "rejected | validate | quit")
     while True:
         try:
             line = input("almanac> ").strip()
@@ -402,6 +514,26 @@ def cmd_console(_args) -> int:
             elif cmd == "check" and rest:
                 ns.files = rest
                 cmd_check(ns)
+            elif cmd == "promote":
+                names = [r for r in rest if not r.startswith("--")]
+                reviewer = "human"
+                if "--reviewer" in rest:
+                    i = rest.index("--reviewer")
+                    if i + 1 < len(rest):
+                        reviewer = rest[i + 1]
+                ns.names, ns.reviewer = names, reviewer
+                cmd_promote(ns)
+            elif cmd == "reject" and len(rest) >= 3:
+                ns.name = rest[0]
+                ns.reason = (" ".join(rest[2:])
+                             if rest[1] == "--reason" else "")
+                if not ns.reason:
+                    print("usage: reject <name> --reason <text>")
+                    continue
+                ns.reviewer = "human"
+                cmd_reject(ns)
+            elif cmd == "rejected":
+                cmd_rejected(ns)
             elif cmd == "validate":
                 cmd_validate(ns)
             elif cmd in {"quit", "exit", "q"}:
@@ -431,6 +563,25 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("drafts",
                         help="list SKILL.md drafts with live safety verdict")
     sp.set_defaults(func=cmd_drafts)
+
+    sp = sub.add_parser("promote",
+                        help="move vetted drafts into skills/ (re-runs safety "
+                             "filter; refuses unsafe drafts)")
+    sp.add_argument("names", nargs="*",
+                    help="draft dir name(s) or agent_id prefix; omit = all")
+    sp.add_argument("--reviewer", default="human",
+                    help="who reviewed/approved this promotion")
+    sp.set_defaults(func=cmd_promote)
+
+    sp = sub.add_parser("reject",
+                        help="delete a draft and record a tombstone in docs/rejected/")
+    sp.add_argument("name", help="draft dir name or agent_id prefix")
+    sp.add_argument("--reason", required=True)
+    sp.add_argument("--reviewer", default="human")
+    sp.set_defaults(func=cmd_reject)
+
+    sp = sub.add_parser("rejected", help="list rejected-draft tombstones")
+    sp.set_defaults(func=cmd_rejected)
 
     sp = sub.add_parser("check", help="run the safety filter over arbitrary files")
     sp.add_argument("files", nargs="+")

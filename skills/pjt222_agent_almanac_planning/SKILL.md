@@ -1,6 +1,6 @@
 ---
-name: pjt222_agent_almanac_terminal_exec
-description: Bounded terminal_exec procedure reverse-engineered from https://github.com/pjt222/agent-almanac
+name: pjt222_agent_almanac_planning
+description: Bounded planning procedure reverse-engineered from https://github.com/pjt222/agent-almanac
 source: https://github.com/pjt222/agent-almanac
 generated_by: almanac_scout/1.0
 generated_at: 2026-09-25T11:36:25Z
@@ -9,16 +9,19 @@ utility_score: 6.6
 free_tier_efficiency: LOW
 loop_risk_profile: LOW
 safety_filter: PASSED
+status: promoted
+reviewed_by: human
+reviewed_at: 2026-09-25T13:35:22Z
 ---
 
-# terminal_exec skill (pjt222_agent_almanac)
+# planning skill (pjt222_agent_almanac)
 
 Reverse-engineered procedure extracted (read-only) from `https://github.com/pjt222/agent-almanac`.
 This draft is compliant with Whorl AGENTS.md §6 skill format and is
 loadable by `src/skill/scout.py` once promoted from `skills/drafts/`.
 
 ## When to use
-Use when a task requires `terminal_exec` and the source agent `pjt222_agent_almanac` pattern scored 6.6/10.
+Use when a task requires `planning` and the source agent `pjt222_agent_almanac` pattern scored 6.6/10.
 
 ## Procedure
 1. Confirm the goal maps to this capability before acting.

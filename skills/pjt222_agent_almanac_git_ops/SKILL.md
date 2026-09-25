@@ -1,33 +1,34 @@
 ---
-name: pjt222_agent_almanac_memory_context
-description: Bounded memory_context procedure reverse-engineered from https://github.com/pjt222/agent-almanac
+name: pjt222_agent_almanac_git_ops
+description: Bounded git_ops procedure reverse-engineered from https://github.com/pjt222/agent-almanac
 source: https://github.com/pjt222/agent-almanac
 generated_by: almanac_scout/1.0
 generated_at: 2026-09-25T11:36:25Z
-content_sha256: 5aa547aecdebda10
+content_sha256: 0c9b164adb0bf73d
 utility_score: 6.6
 free_tier_efficiency: LOW
 loop_risk_profile: LOW
 safety_filter: PASSED
+status: promoted
+reviewed_by: human
+reviewed_at: 2026-09-25T13:35:22Z
 ---
 
-# memory_context skill (pjt222_agent_almanac)
+# git_ops skill (pjt222_agent_almanac)
 
 Reverse-engineered procedure extracted (read-only) from `https://github.com/pjt222/agent-almanac`.
 This draft is compliant with Whorl AGENTS.md §6 skill format and is
 loadable by `src/skill/scout.py` once promoted from `skills/drafts/`.
 
 ## When to use
-Use when a task requires `memory_context` and the source agent `pjt222_agent_almanac` pattern scored 6.6/10.
+Use when a task requires `git_ops` and the source agent `pjt222_agent_almanac` pattern scored 6.6/10.
 
 ## Procedure
 1. Confirm the goal maps to this capability before acting.
 2. Verify output with one check; halt on ambiguity.
 
 ## Tool surface
-- `agent-almanac`
-- `local`
-- `self`
+- (no named tools detected; generic interface)
 
 ## Execution bounds (hard rules)
 - Single-check execution: stop after ONE verification step per action.

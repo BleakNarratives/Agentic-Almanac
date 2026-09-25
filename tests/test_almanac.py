@@ -23,6 +23,8 @@ Run:  python -m pytest tests/ -q   (from repo root)
 import json
 import os
 import re
+import argparse
+import shutil
 import subprocess
 import sys
 
@@ -287,3 +289,77 @@ class TestCliContracts:
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+# ---------------------------------------------------------------------------
+# 8. Draft lifecycle: promote / reject / rejected (sandboxed via DRAFTS_DIR)
+# ---------------------------------------------------------------------------
+UNSAFE_DRAFT_FIXTURE = os.path.join(FIXTURES, "unsafe_draft",
+                                    "skills", "drafts")
+
+
+def _make_tool_cli(tmp_path):
+    """Fresh import of tools/almanac_scout.py with paths redirected to tmp."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "almanac_scout_cli", os.path.join(REPO_ROOT, "tools", "almanac_scout.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    drafts = tmp_path / "skills" / "drafts"
+    shutil.copytree(UNSAFE_DRAFT_FIXTURE, drafts)
+    mod.DRAFTS_DIR = str(drafts)
+    mod.SKILLS_DIR = str(tmp_path / "skills")
+    mod.REJECTED_DIR = str(tmp_path / "docs" / "rejected")
+    os.makedirs(mod.REJECTED_DIR, exist_ok=True)
+    return mod, drafts
+
+
+class TestDraftLifecycle:
+    def test_promote_blocks_unsafe_draft(self, tmp_path):
+        mod, drafts = _make_tool_cli(tmp_path)
+        ns = argparse.Namespace(names=[], reviewer="pytest")
+        assert mod.cmd_promote(ns) == 1
+        assert not os.path.exists(os.path.join(mod.SKILLS_DIR, "evil_candidate")), \
+            "unsafe draft must never reach skills/"
+        assert os.path.isfile(os.path.join(drafts, "evil_candidate", "SKILL.md")), \
+            "blocked draft stays in drafts for inspection"
+
+    def test_reject_writes_tombstone_and_removes_draft(self, tmp_path):
+        mod, drafts = _make_tool_cli(tmp_path)
+        ns = argparse.Namespace(name="evil_candidate",
+                                reason="contains force-push directive",
+                                reviewer="pytest")
+        assert mod.cmd_reject(ns) == 0
+        assert not os.path.exists(os.path.join(drafts, "evil_candidate"))
+        tomb = os.path.join(mod.REJECTED_DIR, "evil_candidate.md")
+        text = open(tomb, encoding="utf-8").read()
+        assert "status: rejected" in text and "force-push" in text
+        assert mod.cmd_rejected(None) == 0
+
+    def test_promote_moves_clean_draft_with_stamp(self, tmp_path):
+        mod, drafts = _make_tool_cli(tmp_path)
+        clean = drafts / "clean_candidate"
+        clean.mkdir()
+        (clean / "SKILL.md").write_text(
+            "---\nname: clean_candidate\ndescription: safe\nstatus: draft\n---\n\n"
+            "# Clean\nRun one check, bounded to 5 steps. Ask the user before "
+            "any destructive action.\n")
+        ns = argparse.Namespace(names=["clean_candidate"], reviewer="pytest")
+        assert mod.cmd_promote(ns) == 0
+        dest = os.path.join(mod.SKILLS_DIR, "clean_candidate", "SKILL.md")
+        stamped = open(dest, encoding="utf-8").read()
+        assert "status: promoted" in stamped
+        assert "reviewed_by: pytest" in stamped
+        assert re.search(r"reviewed_at: \d{4}-\d{2}-\d{2}T", stamped)
+        assert not clean.exists(), "source draft removed after promotion"
+
+    def test_frontmatter_set_creates_and_updates(self):
+        out = engine.frontmatter_set("body only", {"a": "1"})
+        assert out.startswith("---\na: 1\n---\n")
+        out2 = engine.frontmatter_set(out, {"a": "2", "b": "3"})
+        assert "a: 2" in out2 and "b: 3" in out2
+        assert out2.count("a: ") == 1, "update must replace, not duplicate"
+
+    def test_force_push_pattern_in_deny_list(self):
+        v = engine.safety_scan("then run git push --force origin main")
+        assert any("forced git push" in x for x in v)
