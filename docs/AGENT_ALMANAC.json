@@ -10,7 +10,7 @@
     "known_risks": "flags such as unbounded_loop_on_syntax_error, shell_access_with_weak_bounds, prompt_bloat_high_token_overhead"
   },
   "safety_filter": "drafts rejected pre-write if source text matches SAFETY_DENY patterns (ignore-user-pushback, unauthorized auto-commits, guardrail bypass, exfiltration directives, unbounded loops, self-modification)",
-  "updated_at": "2026-09-25T11:36:33Z",
+  "updated_at": "2026-09-25T11:43:01Z",
   "entries": [
     {
       "agent_id": "smolagents-code-agent",
@@ -83,6 +83,77 @@
         "README.md"
       ],
       "scanned_at": "2026-09-25T11:36:25Z"
+    },
+    {
+      "agent_id": "smolagents_ghs",
+      "source_url": "https://github.com/huggingface/smolagents",
+      "utility_score": 7.5,
+      "free_tier_efficiency": "LOW",
+      "capabilities": [
+        "memory_context",
+        "planning",
+        "python_exec",
+        "structured_output",
+        "terminal_exec",
+        "tool_calling",
+        "web_search"
+      ],
+      "loop_risk_profile": "LOW",
+      "scores": {
+        "scope_utility": 10.0,
+        "free_tier_efficiency": 0.0,
+        "loop_risk": 10.0
+      },
+      "known_risks": [
+        "prompt_bloat_high_token_overhead"
+      ],
+      "tool_declarations": [
+        "AgentAudio",
+        "AgentImage",
+        "AgentText",
+        "AgentType",
+        "CodeAgent",
+        "ManagedAgentPromptTemplate",
+        "MultiStepAgent",
+        "ToolCallingAgent",
+        "ToolOutput",
+        "document_qa",
+        "final_answer",
+        "image_generator",
+        "image_transformer",
+        "python_interpreter",
+        "test_agent",
+        "web_search"
+      ],
+      "system_prompt_directives": [
+        "> You must have `gradio` installed to use the UI. Please run `pip install 'smolagents[gradio]'` if it's not the case.",
+        "You are an expert assistant who can solve any task using code blobs. You will be given a task to solve as best you can.",
+        "You are a world expert at analyzing a situation to derive facts, and plan accordingly towards solving a task.",
+        "You are a world expert at analyzing a situation, and plan accordingly towards solving a task.",
+        "You are an expert assistant who can solve any task using tool calls. You will be given a task to solve as best you can."
+      ],
+      "scanned_at": "2026-09-25T11:43:01Z",
+      "scanned_files": [
+        "AGENTS.md",
+        "README.md",
+        "docs/README.md",
+        "docs/source/en/reference/agents.md",
+        "docs/source/hi/reference/agents.md",
+        "docs/source/ko/reference/agents.md",
+        "docs/source/zh/reference/agents.md",
+        "examples/agent_from_any_llm.py",
+        "examples/async_agent/README.md",
+        "examples/open_deep_research/README.md",
+        "examples/plan_customization/README.md",
+        "examples/server/README.md",
+        "src/smolagents/agent_types.py",
+        "src/smolagents/agents.py",
+        "src/smolagents/cli.py",
+        "src/smolagents/prompts/code_agent.yaml",
+        "src/smolagents/prompts/structured_code_agent.yaml",
+        "src/smolagents/prompts/toolcalling_agent.yaml",
+        "tests/fixtures/agents.py"
+      ]
     }
   ]
 }
