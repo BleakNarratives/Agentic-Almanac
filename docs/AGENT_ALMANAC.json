@@ -1,0 +1,88 @@
+{
+  "registry_version": "1.0.0",
+  "generated_by": "tools/almanac_scout.py (read-only Agent Almanac Scout)",
+  "schema": "docs/AGENT_ALMANAC_SCHEMA.json",
+  "compat_schema": "schema/agent_entry_schema.json",
+  "consumer": "src/skill/scout.py \u2014 loads vetted SKILL.md drafts from skills/drafts/",
+  "scoring": {
+    "utility_score": "weighted mean: 0.4*scope_utility + 0.25*free_tier_efficiency + 0.35*loop_risk (each 0..10; loop_risk is INVERSE risk: high = bounded single-check execution)",
+    "free_tier_efficiency": "token-economy tier (HIGH/MEDIUM/LOW) estimated for free inference endpoints (HF Inference Providers, StepFun)",
+    "known_risks": "flags such as unbounded_loop_on_syntax_error, shell_access_with_weak_bounds, prompt_bloat_high_token_overhead"
+  },
+  "safety_filter": "drafts rejected pre-write if source text matches SAFETY_DENY patterns (ignore-user-pushback, unauthorized auto-commits, guardrail bypass, exfiltration directives, unbounded loops, self-modification)",
+  "updated_at": "2026-09-25T11:36:33Z",
+  "entries": [
+    {
+      "agent_id": "smolagents-code-agent",
+      "source": "https://github.com/huggingface/smolagents",
+      "source_url": "https://github.com/huggingface/smolagents",
+      "utility_score": 9.4,
+      "capabilities": [
+        "memory_context",
+        "planning",
+        "python_exec",
+        "terminal_exec",
+        "tool_calling",
+        "web_search"
+      ],
+      "free_tier_efficiency": "HIGH",
+      "loop_risk_profile": "LOW",
+      "scores": {
+        "scope_utility": 9.6,
+        "free_tier_efficiency": 8.3,
+        "loop_risk": 10.0
+      },
+      "known_risks": [],
+      "reverse_engineered_skills": [
+        "skills/drafts/smolagents_code_agent_memory_context/SKILL.md",
+        "skills/drafts/smolagents_code_agent_planning/SKILL.md",
+        "skills/drafts/smolagents_code_agent_python_exec/SKILL.md",
+        "skills/drafts/smolagents_code_agent_terminal_exec/SKILL.md",
+        "skills/drafts/smolagents_code_agent_tool_calling/SKILL.md",
+        "skills/drafts/smolagents_code_agent_web_search/SKILL.md"
+      ],
+      "mined_files": [
+        "AGENTS.md",
+        "README.md",
+        "examples/open_deep_research/README.md",
+        "src/smolagents/agents.py"
+      ],
+      "scanned_at": "2026-09-25T11:36:20Z"
+    },
+    {
+      "agent_id": "pjt222_agent_almanac",
+      "source": "https://github.com/pjt222/agent-almanac",
+      "source_url": "https://github.com/pjt222/agent-almanac",
+      "utility_score": 6.6,
+      "capabilities": [
+        "git_ops",
+        "memory_context",
+        "planning",
+        "structured_output",
+        "terminal_exec"
+      ],
+      "free_tier_efficiency": "LOW",
+      "loop_risk_profile": "LOW",
+      "scores": {
+        "scope_utility": 8.0,
+        "free_tier_efficiency": 0.0,
+        "loop_risk": 9.8
+      },
+      "known_risks": [
+        "prompt_bloat_high_token_overhead"
+      ],
+      "reverse_engineered_skills": [
+        "skills/drafts/pjt222_agent_almanac_git_ops/SKILL.md",
+        "skills/drafts/pjt222_agent_almanac_memory_context/SKILL.md",
+        "skills/drafts/pjt222_agent_almanac_planning/SKILL.md",
+        "skills/drafts/pjt222_agent_almanac_structured_output/SKILL.md",
+        "skills/drafts/pjt222_agent_almanac_terminal_exec/SKILL.md"
+      ],
+      "mined_files": [
+        "CLAUDE.md",
+        "README.md"
+      ],
+      "scanned_at": "2026-09-25T11:36:25Z"
+    }
+  ]
+}
