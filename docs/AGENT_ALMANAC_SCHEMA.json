@@ -1,0 +1,108 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AgentAlmanacRegistry",
+  "description": "Registry shape for docs/AGENT_ALMANAC.json produced by tools/almanac_scout.py. Each entry is a scored, read-only analysis of an open-source agent (GitHub / Hugging Face).",
+  "type": "object",
+  "properties": {
+    "registry_version": {
+      "type": "string"
+    },
+    "updated_at": {
+      "type": "string"
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/agent_entry"
+      }
+    }
+  },
+  "required": [
+    "registry_version",
+    "entries"
+  ],
+  "definitions": {
+    "agent_entry": {
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "source_url": {
+          "type": "string"
+        },
+        "utility_score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 10
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "free_tier_efficiency": {
+          "type": "string",
+          "enum": [
+            "HIGH",
+            "MEDIUM",
+            "LOW"
+          ]
+        },
+        "loop_risk_profile": {
+          "type": "string",
+          "enum": [
+            "LOW",
+            "MEDIUM",
+            "HIGH"
+          ]
+        },
+        "scores": {
+          "type": "object",
+          "properties": {
+            "scope_utility": {
+              "type": "number"
+            },
+            "free_tier_efficiency": {
+              "type": "number"
+            },
+            "loop_risk": {
+              "type": "number"
+            }
+          }
+        },
+        "known_risks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reverse_engineered_skills": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "mined_files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "scanned_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "agent_id",
+        "source",
+        "utility_score",
+        "capabilities"
+      ]
+    }
+  }
+}
