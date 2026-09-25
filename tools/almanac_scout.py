@@ -128,8 +128,9 @@ loadable by `src/skill/scout.py` once promoted from `skills/drafts/`.
 """
 
 
-def draft_skills(entry: dict, texts: dict) -> list:
+def draft_skills(entry: dict, texts: dict, drafts_dir: str = None) -> list:
     """Write SKILL.md drafts for one almanac entry. Rejects unsafe content."""
+    drafts_dir = drafts_dir or DRAFTS_DIR
     caps = entry["capabilities"]
     if not caps:
         return []
@@ -175,7 +176,7 @@ def draft_skills(entry: dict, texts: dict) -> list:
             print(f"  [REJECTED] skills/drafts/{name}/SKILL.md :: "
                   + "; ".join(violations), file=sys.stderr)
             continue
-        outdir = os.path.join(DRAFTS_DIR, name)
+        outdir = os.path.join(drafts_dir, name)
         os.makedirs(outdir, exist_ok=True)
         outfile = os.path.join(outdir, "SKILL.md")
         with open(outfile, "w", encoding="utf-8") as fh:
@@ -217,6 +218,20 @@ def upsert_entry(reg: dict, entry: dict) -> None:
 # ==========================================================================
 # Commands
 # ==========================================================================
+
+# ---------------------------------------------------------------------------
+# corpus gate — per-FILE quarantine instead of whole-repo rejection.
+# A legit vendor repo (opencode, aider, ...) documents `curl|bash` installs
+# and discusses prompt-injection defensively; that must not poison the whole
+# ingest. Files that trip the deny-list are dropped from the mining set
+# (their text is never quoted into a skill); only the aggregate corpus is
+# hard-rejected when MOST files are hostile (>50%).
+# ---------------------------------------------------------------------------
+def quarantine_unsafe_files(texts: dict) -> tuple:
+    safe = {p: b for p, b in texts.items() if not safety_scan(b)}
+    dropped = sorted(set(texts) - set(safe))
+    return safe, dropped
+
 
 def cmd_ingest(args) -> int:
     # Fetch/ingest delegates to scouts/gh_repo_scout (GitHub tree API + local
@@ -264,6 +279,27 @@ def cmd_ingest(args) -> int:
     print(f"[ingest] mined {len(texts)} file(s): "
           + ", ".join(sorted(texts)[:6]) + ("..." if len(texts) > 6 else ""))
 
+    texts, dropped = quarantine_unsafe_files(texts)
+    for d in dropped[:8]:
+        print(f"  [quarantine] excluded unsafe source file: {d}")
+    if len(dropped) > 8:
+        print(f"  [quarantine] ...and {len(dropped) - 8} more")
+    if not texts:
+        print("[reject] every ingested file tripped the safety filter; "
+              "nothing quarantined-in is left to mine.", file=sys.stderr)
+        return 1
+    if len(dropped) / max(1, len(dropped) + len(texts)) > 0.5:
+        print(f"[reject] majority of the corpus ({len(dropped)}/{len(dropped)+len(texts)} "
+              f"files) is hostile — refusing this source outright.", file=sys.stderr)
+        return 1
+
+    # INDEX GATE (same bookkeeping as scouts/run_pipeline): rerun-safe batch.
+    if not getattr(args, "force", False):
+        proceed, why = engine.index_check(source, texts, agent_id)
+        if not proceed:
+            print(f"[index] SKIP '{agent_id}': {why}", file=sys.stderr)
+            return 3
+
     sc = score_agent(texts)
     entry = {
         "agent_id": agent_id,
@@ -277,17 +313,28 @@ def cmd_ingest(args) -> int:
         "known_risks": sc["known_risks"],
         "reverse_engineered_skills": [],
         "mined_files": sorted(texts),
+        "quarantined_files": dropped,
         "scanned_at": _now(),
     }
-    entry["reverse_engineered_skills"] = draft_skills(entry, texts)
+    ok, method, detail = engine.validate_against_schema(entry)
+    if not ok:
+        print(f"[reject] entry fails schema ({method}): {detail}", file=sys.stderr)
+        return 1
+    entry["reverse_engineered_skills"] = draft_skills(
+        entry, texts, drafts_dir=getattr(args, "drafts_dir", None))
 
     reg = load_registry()
     upsert_entry(reg, entry)
     save_registry(reg)
+    written = [p for p in entry["reverse_engineered_skills"]
+               if os.path.isfile(os.path.join(REPO_ROOT, p))]
+    if written:
+        engine.index_record(source, texts, agent_id, entry["utility_score"])
     print(f"[ingest] {agent_id}: utility={entry['utility_score']} "
           f"tier={entry['free_tier_efficiency']} loop={entry['loop_risk_profile']} "
-          f"drafts={len(entry['reverse_engineered_skills'])}")
-    return 0
+          f"drafts={len(entry['reverse_engineered_skills'])} "
+          f"quarantined={len(dropped)}")
+    return 0 if written else 1
 
 
 def cmd_score(args) -> int:
@@ -490,7 +537,7 @@ def cmd_console(_args) -> int:
     print("Agent Almanac Scout console — read-only. "
           "cmds: score | drafts | ingest <path|url> | check <file> | "
           "promote [name...] [--reviewer X] | reject <name> --reason R | "
-          "rejected | validate | quit")
+          "rejected | validate | index | quit")
     while True:
         try:
             line = input("almanac> ").strip()
@@ -536,6 +583,9 @@ def cmd_console(_args) -> int:
                 cmd_rejected(ns)
             elif cmd == "validate":
                 cmd_validate(ns)
+            elif cmd == "index":
+                ns.json = False
+                cmd_index(ns)
             elif cmd in {"quit", "exit", "q"}:
                 return 0
             else:
@@ -544,16 +594,110 @@ def cmd_console(_args) -> int:
             print("error:", exc)
 
 
+# ---------------------------------------------------------------------------
+# batch — drive the scouts over a targets file, with index dedupe reporting
+# ---------------------------------------------------------------------------
+def _dispatch_scout(target: str):
+    """Route a target string to the right scout's main()."""
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scouts"))
+    t = target.lower()
+    if "huggingface.co" in t or re.match(r"^(model|space|dataset):", t):
+        import hf_hub_scout
+        return hf_hub_scout.main
+    import gh_repo_scout
+    return gh_repo_scout.main
+
+
+def cmd_batch(args) -> int:
+    try:
+        with open(args.targets_file, "r", encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except OSError as exc:
+        print(f"[error] cannot read targets file: {exc}", file=sys.stderr)
+        return 2
+    targets = [l.split("#", 1)[0].strip() for l in lines]
+    targets = [t for t in targets if t]
+    if not targets:
+        print("[error] no targets found in file (lines starting with # are comments)",
+              file=sys.stderr)
+        return 2
+
+    results = []  # (target, exit_code)
+    for i, tgt in enumerate(targets, 1):
+        print(f"\n=== [{i}/{len(targets)}] {tgt} ===")
+        ns = argparse.Namespace(target=tgt, name=None, source=None,
+                                force=args.force, drafts_dir=args.drafts_dir)
+        try:
+            rc = cmd_ingest(ns)
+        except SystemExit as e:      # scouts may sys.exit internally
+            rc = int(e.code or 0)
+        except Exception as exc:
+            print(f"[error] ingest crashed on {tgt}: {exc}", file=sys.stderr)
+            rc = 2
+        results.append((tgt, rc))
+
+    ok   = [t for t, r in results if r == 0]
+    skip = [t for t, r in results if r == 3]
+    bad  = [t for t, r in results if r not in (0, 3)]
+    print("\n=== batch summary ===")
+    print(f"  ingested : {len(ok)}")
+    print(f"  skipped  : {len(skip)} (index: unchanged/collision)")
+    print(f"  failed   : {len(bad)}")
+    for t, r in results:
+        tag = {0: "OK", 3: "SKIP"}.get(r, f"FAIL(rc={r})")
+        print(f"  [{tag:>9}] {t}")
+    return 1 if bad else 0
+
+
+def cmd_index(args) -> int:
+    idx = engine.load_index()
+    if args.json:
+        print(json.dumps(idx, indent=2, sort_keys=True))
+        return 0
+    if not idx:
+        print("(index empty — run `batch` or a scout with --register first)")
+        return 0
+    width = max(len(u) for u in idx) + 2
+    print(f"{'SOURCE'.ljust(width)} {'AGENT_ID':<28} {'UTIL':>5}  {'FILES':>5}  INGESTED")
+    for url in sorted(idx):
+        r = idx[url]
+        print(f"{url.ljust(width)} {r.get('agent_id','?'):<28} "
+              f"{r.get('utility_score', 0):>5}  {r.get('files_ingested', '?'):>5}  "
+              f"{r.get('ingested_at', '-')}")
+    print(f"\n{len(idx)} source(s) indexed at "
+          f"{os.path.relpath(engine.INDEX_PATH, engine.REPO_ROOT)}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="almanac_scout",
                                 description="Agent Almanac Scout (read-only)")
     sub = p.add_subparsers(dest="command", required=True)
+
+    sp = sub.add_parser("batch",
+                        help="run read-only ingest over a targets file (one URL/path "
+                             "per line, # comments ok); dedupes via ALMANAC_INDEX; "
+                             "writes skills/drafts/ for human promote/reject")
+    sp.add_argument("targets_file")
+    sp.add_argument("--force", action="store_true",
+                    help="override index idempotency/collision guards")
+    sp.add_argument("--drafts-dir", default=None,
+                    help=f"draft output dir (default: {os.path.relpath(DRAFTS_DIR, REPO_ROOT)}/)")
+    sp.set_defaults(func=cmd_batch)
+
+    sp = sub.add_parser("index", help="show ALMANAC_INDEX bookkeeping")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_index)
 
     sp = sub.add_parser("ingest",
                         help="mine a repo (GitHub/HF URL) or local path (read-only)")
     sp.add_argument("target")
     sp.add_argument("--name", help="override agent_id")
     sp.add_argument("--source", help="override recorded source URL")
+    sp.add_argument("--force", action="store_true",
+                    help="override index idempotency/collision guards")
+    sp.add_argument("--drafts-dir", default=None,
+                    help="draft output dir (default: skills/drafts/)")
     sp.set_defaults(func=cmd_ingest)
 
     sp = sub.add_parser("score", help="ranked utility table from live registry")

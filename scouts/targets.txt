@@ -1,0 +1,16 @@
+# Agentic-Almanac batch ingest targets — one GitHub/HF URL or local path per line.
+# Lines starting with # are ignored. Routing: huggingface.co/* (or model:/space:/
+# dataset: prefixes) -> scouts/hf_hub_scout.py; everything else -> scouts/gh_repo_scout.py.
+#
+# Run:  python tools/almanac_scout.py batch scouts/targets.txt --register
+# Rerun-safe: ALMANAC_INDEX content-hash dedupe skips unchanged sources (rc 3).
+# Force rescan: add --force.
+
+# --- fixtures (offline, always work) ---
+tests/fixtures/clean_agent_repo
+
+# --- live targets (network; uncomment when you want to mine them) ---
+# https://github.com/Aider-AI/aider
+# https://github.com/All-Hands-AI/OpenHands
+# https://github.com/sst/opencode
+# https://huggingface.co/spaces/davanstrien/molt_scouting

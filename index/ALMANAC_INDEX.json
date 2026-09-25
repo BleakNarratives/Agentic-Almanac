@@ -1,0 +1,16 @@
+{
+  "local:/workspace/tests/fixtures/clean_agent_repo": {
+    "agent_id": "clean_agent_repo",
+    "content_hash": "e190047b5bdc041b",
+    "files_ingested": 1,
+    "ingested_at": "2026-09-25T14:08:14Z",
+    "utility_score": 8.1
+  },
+  "local:idxdup": {
+    "agent_id": "idx_unit",
+    "content_hash": "e190047b5bdc041b",
+    "files_ingested": 1,
+    "ingested_at": "2026-09-25T14:12:21Z",
+    "utility_score": 8.1
+  }
+}

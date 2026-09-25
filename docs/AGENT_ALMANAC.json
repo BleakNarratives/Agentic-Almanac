@@ -10,7 +10,7 @@
     "known_risks": "flags such as unbounded_loop_on_syntax_error, shell_access_with_weak_bounds, prompt_bloat_high_token_overhead"
   },
   "safety_filter": "drafts rejected pre-write if source text matches SAFETY_DENY patterns (ignore-user-pushback, unauthorized auto-commits, guardrail bypass, exfiltration directives, unbounded loops, self-modification)",
-  "updated_at": "2026-09-25T11:43:01Z",
+  "updated_at": "2026-09-25T14:07:41Z",
   "entries": [
     {
       "agent_id": "smolagents-code-agent",

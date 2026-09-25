@@ -168,7 +168,8 @@ def cmd_scout(args) -> int:
     return engine.run_pipeline(agent_id, source_url, texts,
                                out_dir=args.out_dir, template_path=args.template,
                                schema_path=args.schema, dry_run=args.dry_run,
-                               register=args.register, verbose=verbose)
+                               register=args.register, verbose=verbose,
+                               force=args.force)
 
 
 def main(argv=None) -> int:
@@ -189,6 +190,8 @@ def main(argv=None) -> int:
                     help="also upsert the entry into docs/AGENT_ALMANAC.json")
     ap.add_argument("--dry-run", action="store_true",
                     help="score + safety-check without writing files")
+    ap.add_argument("--force", action="store_true",
+                    help="override ALMANAC_INDEX idempotency/collision guards")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
     return cmd_scout(args)

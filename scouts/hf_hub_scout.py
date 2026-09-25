@@ -156,6 +156,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--register", action="store_true",
                     help="upsert the scored entry into docs/AGENT_ALMANAC.json")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--force", action="store_true",
+                    help="override ALMANAC_INDEX idempotency/collision guards")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
 
@@ -172,7 +174,7 @@ def main(argv: list[str] | None = None) -> int:
         return engine.run_pipeline(agent_id, f"local:{os.path.abspath(args.target)}", corpus,
                                    out_dir=args.out_dir, template_path=args.template,
                                    schema_path=args.schema, dry_run=args.dry_run,
-                                   register=args.register, verbose=args.verbose)
+                                   register=args.register, verbose=args.verbose, force=args.force)
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -201,7 +203,7 @@ def main(argv: list[str] | None = None) -> int:
     return engine.run_pipeline(agent_id, display, corpus,
                                out_dir=args.out_dir, template_path=args.template,
                                schema_path=args.schema, dry_run=args.dry_run,
-                               register=args.register, verbose=args.verbose)
+                               register=args.register, verbose=args.verbose, force=args.force)
 
 
 if __name__ == "__main__":

@@ -88,16 +88,21 @@ SAFETY_DENY = [
      "potential credential exfiltration directive"),
     (r"(disable|bypass|turn off|ignore)\s+(all\s+)?(safety|guardrails?|filters?|permissions?)",
      "disables safety guardrails"),
-    (r"(infinite|endless|unbounded|unlimited)\s+(loop|retry|retries|iterations?)",
-     "commands an unbounded retry loop"),
-    (r"(keep|continue)\s+(trying|retrying)\s+(forever|indefinitely|until it works)",
-     "open-ended retry without bound"),
-    (r"rm\s+-rf\s+/|curl[^|]*\|\s*(ba)?sh|wget[^|]*\|\s*(ba)?sh",
-     "destructive/piped-to-shell one-liner"),
+    # NOTE: broad phrases like "unbounded loop" / "self-modification" are NOT
+    # corpus-gate deny items — legit agent docs *discuss* these concepts.
+    # They remain scoring signals (loop-risk/known_risks) and only hard-block
+    # when phrased as explicit imperatives below. Likewise, a vendor's own
+    # `curl <official-domain>/install | bash` README snippet is normal install
+    # documentation → recorded as known_risk 'piped_shell_install_snippet',
+    # never laundered into a skill body, but not a corpus-gate rejection.
+    (r"\bdo not (stop|quit|exit)\b.{0,60}\buntil\b|\bnever (stop|give up|quit)\b",
+     "commands the agent never stop/retry-loop"),
+    (r"rm\s+-rf\s+/",
+     "destructive one-liner (rm -rf /)"),
     (r"(override|disregard|forget)\s+(previous|prior|above|system)\s+(instructions?|rules?|prompts?)",
      "prompt-injection style override directive"),
-    (r"(self[- ])?modif(y|ication)|edit your own (prompt|instructions)|change your own weights",
-     "self-modification directive"),
+    (r"\b(?:you should |now )?modify your own (?:system )?(?:prompt|instructions?|weights)\b",
+     "explicit self-modification imperative"),
     (r"git\s+push\s+(-f|--force)(\s|$)",
      "forced git push (history destruction)"),
 ]
@@ -206,6 +211,29 @@ def safety_scan(text: str) -> list:
     return [why for pat, why in SAFETY_DENY if re.search(pat, text, re.IGNORECASE)]
 
 
+def corpus_scan(texts: dict) -> tuple:
+    """Corpus-level gate: per-FILE quarantine instead of whole-repo rejection.
+
+    A legit vendor repo (opencode, aider, ...) documents `curl|bash` installs
+    and discusses prompt-injection defensively; that must not poison the whole
+    ingest. Files tripping the deny-list are dropped from the mining set (their
+    text is never quoted into a skill). The source as a whole is rejected only
+    when the MAJORITY of files are hostile (>50%) or nothing clean remains.
+
+    Returns (safe_texts, dropped_paths, fatal_reason_or_None).
+    """
+    safe = {p: b for p, b in texts.items() if not safety_scan(b)}
+    dropped = sorted(set(texts) - set(safe))
+    total = len(texts)
+    if not safe:
+        return safe, dropped, ("every ingested file tripped the safety filter; "
+                               "nothing quarantined-in is left to mine")
+    if total and len(dropped) / total > 0.5:
+        return safe, dropped, (f"majority of the corpus ({len(dropped)}/{total} "
+                               "files) is hostile — refusing this source outright")
+    return safe, dropped, None
+
+
 # ---------------------------------------------------------------------------
 # Scoring rubric (shared by every scout)
 #   utility = 0.4*scope_utility + 0.25*free_tier_efficiency + 0.35*loop_risk
@@ -237,6 +265,10 @@ def score_agent(texts: dict) -> dict:
         risks.append("shell_access_with_weak_bounds")
     if heavy >= 4:
         risks.append("prompt_bloat_high_token_overhead")
+    # Vendor install one-liners (curl|bash) are normal README documentation:
+    # record as a known risk, never a corpus-gate rejection (see SAFETY_DENY).
+    if re.search(r"(curl|wget)[^|\n]*\|\s*(ba)?sh", blob, re.IGNORECASE):
+        risks.append("piped_shell_install_snippet")
 
     return {
         "capabilities": caps,
@@ -419,13 +451,85 @@ def upsert_entry(reg: dict, entry: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# ALMANAC_INDEX — batch-ingest bookkeeping (idempotency + collision guard)
+#   index/ALMANAC_INDEX.json : {source_url -> agent_id, content_hash, utility,
+#                               ingested_at, files_ingested}
+# ---------------------------------------------------------------------------
+INDEX_PATH = os.path.join(REPO_ROOT, "index", "ALMANAC_INDEX.json")
+
+
+def load_index(path: str = INDEX_PATH) -> dict:
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_index(index: dict, path: str = INDEX_PATH) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(index, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    os.replace(tmp, path)
+
+
+def corpus_hash(texts: dict) -> str:
+    """Stable hash over the mined corpus (path + content), order-independent."""
+    h = hashlib.sha256()
+    for rel in sorted(texts):
+        h.update(rel.encode("utf-8"))
+        h.update(b"\0")
+        h.update(texts[rel].encode("utf-8", "replace"))
+        h.update(b"\0")
+    return h.hexdigest()[:16]
+
+
+def index_check(source_url: str, texts: dict, agent_id: str,
+                force: bool = False, path: str = INDEX_PATH) -> tuple:
+    """Returns (proceed: bool, reason: str). Collision-safe and idempotent."""
+    index = load_index(path)
+    chash = corpus_hash(texts)
+    rec = index.get(source_url)
+    if rec:
+        if rec.get("content_hash") == chash and not force:
+            return False, ("unchanged since last ingest "
+                           f"({rec.get('ingested_at', '?')}) — use --force to re-scan")
+        if rec.get("agent_id") != agent_id and not force:
+            return False, (f"COLLISION: source already indexed under agent_id "
+                           f"'{rec.get('agent_id')}' — pass --force to overwrite")
+    # also guard: this agent_id already owns a DIFFERENT source
+    for url, r in index.items():
+        if r.get("agent_id") == agent_id and url != source_url and not force:
+            return False, (f"COLLISION: agent_id '{agent_id}' already indexed "
+                           f"for source '{url}' — pass --force to overwrite")
+    return True, ""
+
+
+def index_record(source_url: str, texts: dict, agent_id: str,
+                 utility: float, path: str = INDEX_PATH) -> None:
+    index = load_index(path)
+    index[source_url] = {
+        "agent_id": agent_id,
+        "content_hash": corpus_hash(texts),
+        "utility_score": utility,
+        "files_ingested": len(texts),
+        "ingested_at": now_iso(),
+    }
+    save_index(index, path)
+
+
+# ---------------------------------------------------------------------------
 # Main pipeline (shared by gh_repo_scout, hf_hub_scout, almanac_scout)
 #   score → schema-validate → render → safety-filter → write SKILL.md
 # ---------------------------------------------------------------------------
 def run_pipeline(agent_id: str, source_url: str, texts: dict, *,
                  out_dir: str = DEFAULT_OUT, template_path: str = DEFAULT_TEMPLATE,
                  schema_path: str = DEFAULT_SCHEMA, dry_run: bool = False,
-                 register: bool = False, verbose: bool = False) -> int:
+                 register: bool = False, verbose: bool = False,
+                 force: bool = False, use_index: bool = True) -> int:
     if not texts:
         print("[error] no readable text files were ingested; nothing to score.",
               file=sys.stderr)
@@ -433,19 +537,18 @@ def run_pipeline(agent_id: str, source_url: str, texts: dict, *,
     print(f"[scout] ingested {len(texts)} files "
           f"({sum(len(v) for v in texts.values())//1024} KiB, read-only)")
 
-    # HARD GATE: if the mined corpus itself carries aggressive directives,
-    # reject the whole target before scoring/rendering — never quote or
-    # launder hostile prompt text into a SKILL.md.
-    corpus_violations = safety_scan("\n".join(texts.values()))
-    if corpus_violations and not dry_run:
-        print("[reject] source corpus contains unsafe directives:", file=sys.stderr)
-        for v in corpus_violations:
-            print(f"          - {v}", file=sys.stderr)
+    # CORPUS GATE: quarantine hostile FILES (never launder their text into a
+    # skill); reject the whole source only when >50% of files are hostile.
+    texts, dropped, fatal = corpus_scan(texts)
+    for d in dropped[:8]:
+        print(f"  [quarantine] excluded unsafe source file: {d}")
+    if len(dropped) > 8:
+        print(f"  [quarantine] ...and {len(dropped) - 8} more")
+    if fatal:
+        print(f"[reject] {fatal}", file=sys.stderr)
         print("[reject] no files written (use --dry-run to inspect scores)",
               file=sys.stderr)
         return 1
-    if corpus_violations:
-        print(f"[dry-run] would REJECT at corpus gate: {'; '.join(corpus_violations)}")
 
     scoring = score_agent(texts)
     entry = make_entry(agent_id, source_url, texts, scoring)
@@ -457,6 +560,14 @@ def run_pipeline(agent_id: str, source_url: str, texts: dict, *,
     print(f"[score] capabilities: {', '.join(entry['capabilities']) or '(none)'}")
     if entry["known_risks"]:
         print(f"[score] known risks : {', '.join(entry['known_risks'])}")
+
+    # INDEX GATE: idempotency + collision guard (skipped for --dry-run so you
+    # can always inspect scores without touching bookkeeping).
+    if use_index and not dry_run:
+        proceed, why = index_check(source_url, texts, agent_id, force=force)
+        if not proceed:
+            print(f"[index] SKIP '{agent_id}': {why}", file=sys.stderr)
+            return 3
 
     ok, method, detail = validate_against_schema(entry, schema_path)
     validation_note = f"{method} validator: {detail}"
@@ -504,6 +615,11 @@ def run_pipeline(agent_id: str, source_url: str, texts: dict, *,
         save_registry(reg)
         print(f"[registry] upserted '{agent_id}' in "
               f"{os.path.relpath(ALMANAC_PATH, REPO_ROOT)}")
+
+    if use_index and not dry_run and written:
+        index_record(source_url, texts, agent_id, entry["utility_score"])
+        print(f"[index] recorded '{source_url}' in "
+              f"{os.path.relpath(INDEX_PATH, REPO_ROOT)}")
 
     print(f"[done] {written}/{len(candidates)} SKILL.md file(s) "
           + ("validated (dry-run)" if dry_run else "written"))

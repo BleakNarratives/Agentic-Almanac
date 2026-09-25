@@ -194,7 +194,8 @@ class TestCleanPipeline:
     def test_run_pipeline_writes_rendered_skills(self, tmp_path):
         out = tmp_path / "skills"
         rc = engine.run_pipeline("clean_unit", "local:tests/fixtures/clean_agent_repo",
-                                 read_texts(CLEAN), out_dir=str(out))
+                                 read_texts(CLEAN), out_dir=str(out),
+                                 use_index=False)
         assert rc == 0
         files = sorted(out.rglob("SKILL.md"))
         assert files, "clean fixture must produce at least one SKILL.md"
@@ -363,3 +364,65 @@ class TestDraftLifecycle:
     def test_force_push_pattern_in_deny_list(self):
         v = engine.safety_scan("then run git push --force origin main")
         assert any("forced git push" in x for x in v)
+
+
+# ---------------------------------------------------------------------------
+# ALMANAC_INDEX — batch idempotency + collision guard (Move #4)
+# ---------------------------------------------------------------------------
+class TestAlmanacIndex:
+    IDX_KEYS = {"README.md": "bash terminal git commit @tool search_web duckduckgo"}
+
+    def _idx(self, tmp_path):
+        return str(tmp_path / "index" / "ALMANAC_INDEX.json")
+
+    def test_record_then_idempotent_skip(self, tmp_path):
+        p = self._idx(tmp_path)
+        engine.index_record("local:A", self.IDX_KEYS, "agentA", 7.5, path=p)
+        ok, why = engine.index_check("local:A", self.IDX_KEYS, "agentA", path=p)
+        assert not ok and "unchanged" in why
+
+    def test_changed_content_proceeds(self, tmp_path):
+        p = self._idx(tmp_path)
+        engine.index_record("local:A", self.IDX_KEYS, "agentA", 7.5, path=p)
+        changed = dict(self.IDX_KEYS, extra="new text")
+        ok, _ = engine.index_check("local:A", changed, "agentA", path=p)
+        assert ok
+
+    def test_agent_id_collision_blocked_and_forced(self, tmp_path):
+        p = self._idx(tmp_path)
+        engine.index_record("local:A", self.IDX_KEYS, "agentA", 7.5, path=p)
+        changed = dict(self.IDX_KEYS, extra="new")
+        ok, why = engine.index_check("local:A", changed, "agentB", path=p)
+        assert not ok and "COLLISION" in why
+        ok_f, _ = engine.index_check("local:A", changed, "agentB", force=True, path=p)
+        assert ok_f
+
+    def test_cross_source_agent_id_guard(self, tmp_path):
+        p = self._idx(tmp_path)
+        engine.index_record("local:A", self.IDX_KEYS, "agentA", 7.5, path=p)
+        ok, why = engine.index_check("local:B", self.IDX_KEYS, "agentA", path=p)
+        assert not ok and "already indexed for source" in why
+
+    def test_pipeline_skips_duplicate_ingest(self, tmp_path, capsys):
+        out = tmp_path / "skills"
+        texts = read_texts(CLEAN)
+        rc1 = engine.run_pipeline("idx_unit", "local:idxdup", texts, out_dir=str(out),
+                                  force=True)
+        assert rc1 == 0
+        rc2 = engine.run_pipeline("idx_unit", "local:idxdup", texts, out_dir=str(out),
+                                  force=False)
+        assert rc2 == 3
+        assert "[index] SKIP" in capsys.readouterr().err
+
+    def test_batch_cli_dedupes_second_run(self, tmp_path):
+        targets = tmp_path / "targets.txt"
+        targets.write_text(f"# comment\n{CLEAN}\n")
+        cmd = [sys.executable, os.path.join(REPO_ROOT, "tools", "almanac_scout.py"),
+               "batch", str(targets)]
+        first = subprocess.run(cmd, capture_output=True, text=True)
+        assert first.returncode == 0, first.stdout + first.stderr
+        assert "ingested : 1" in first.stdout
+        second = subprocess.run(cmd, capture_output=True, text=True)
+        assert second.returncode == 0
+        assert "skipped  : 1" in second.stdout
+        assert "SKIP" in second.stdout
